@@ -2424,7 +2424,7 @@
           "public-v1"
         ],
         "summary": "Create Submission",
-        "description": "Upload an audio recording and queue it for processing (transcription,\nchunking, vocabulary enrichment). Accepts any audio format ffmpeg can\ndecode, including the ``audio/webm`` (Opus) files that MediaRecorder\nproduces. Poll ``/v1/submissions/{id}/status`` until ``ready``.\n\nUploads count against your plan's daily-submission and monthly audio\nquotas, and the file must be within your plan's size and duration caps.\n\n**Requires scope:** `submissions:write`",
+        "description": "Upload an audio recording and queue it for processing (transcription,\nchunking, vocabulary enrichment). Accepts any audio format ffmpeg can\ndecode, including the ``audio/webm`` (Opus) files that MediaRecorder\nproduces. Poll ``/v1/submissions/{id}/status`` until ``ready``.\n\nUploads count against your plan's daily-submission and monthly audio\nquotas, and the file must be within your plan's size and duration caps.\n\nSet ``enrichment_mode=agent`` (plan feature ``byo_enrichment``) to skip the\ninternal AI enrichment entirely and finish the lesson yourself: the\nsubmission still becomes ``ready``, with tokens but no meanings, and you\nsupply those through ``PUT /v1/submissions/{id}/translations/{language}``\ntargeting the submission's OWN translation language, then ``commit``.\n\n**Requires scope:** `submissions:write`",
         "operationId": "create_submission_api_v1_submissions_post",
         "requestBody": {
           "content": {
@@ -2796,7 +2796,7 @@
           "public-v1"
         ],
         "summary": "Add Languages",
-        "description": "Trigger the internal Groq fan-out for ordinary target languages. Returns\none job id per enqueued language (poll /v1/jobs/{job_id}); leveled\npseudo-codes are skipped with reason ``agent_only_target`` (use the draft\nflow for those). No email is sent.\n\n**Requires scope:** `translations:write`",
+        "description": "Trigger the internal Groq fan-out for ordinary target languages. Returns\none job id per enqueued language (poll /v1/jobs/{job_id}); leveled\npseudo-codes are skipped with reason ``agent_only_target`` (use the draft\nflow for those). No email is sent.\n\n409 ``enrichment_incomplete`` for a lesson uploaded with\n``enrichment_mode=agent`` that has not been filled in yet: the fan-out\ncopies the lesson's meanings, so it would produce empty siblings.\n\n**Requires scope:** `translations:write`",
         "operationId": "add_languages_api_v1_submissions__submission_id__languages_post",
         "parameters": [
           {
@@ -3037,7 +3037,7 @@
           "public-v1"
         ],
         "summary": "Put Translations",
-        "description": "Upsert a batch (1..100) of drafted sentences for one language. Each\nsentence is validated against the primary's real tokens; an invalid sentence\nis rejected individually (with a reason) while the rest are stored. Re-PUT a\nposition to replace it.\n\n**Requires scope:** `translations:write`",
+        "description": "Upsert a batch (1..100) of drafted sentences for one language. Each\nsentence is validated against the primary's real tokens; an invalid sentence\nis rejected individually (with a reason) while the rest are stored. Re-PUT a\nposition to replace it.\n\nTargeting the submission's OWN translation language is legal only for a\nlesson uploaded with ``enrichment_mode=agent``: that is the BYO-enrichment\ncold fill, where the optional ``token_details`` (cefr/gender per token) are\nalso read. Any other target is an ordinary sibling draft, and needs the\nlesson's own language to be committed first.\n\n**Requires scope:** `translations:write`",
         "operationId": "put_translations_api_v1_submissions__submission_id__translations__language__put",
         "parameters": [
           {
@@ -3271,7 +3271,7 @@
           "public-v1"
         ],
         "summary": "Commit Language",
-        "description": "Commit a complete draft: enqueue the job that mints the sibling\nsubmission. 409 (with the missing positions) if any sentence still lacks a\ndraft. Poll the returned job id via /v1/jobs/{job_id}.\n\n**Requires scope:** `translations:write`",
+        "description": "Commit a complete draft: enqueue the job that mints the sibling\nsubmission. 409 (with the missing positions) if any sentence still lacks a\ndraft. Poll the returned job id via /v1/jobs/{job_id}.\n\nCommitting the submission's OWN translation language (only possible for a\nlesson uploaded with ``enrichment_mode=agent``) applies the draft IN PLACE\ninstead: meanings, sentence translations and any supplied cefr/gender are\nwritten back into this submission, vocabulary is minted from them, and the\nlesson stops counting as bare. No new sibling is created, so it does not\nconsume a language slot.\n\n**Requires scope:** `translations:write`",
         "operationId": "commit_language_api_v1_submissions__submission_id__translations__language__commit_post",
         "parameters": [
           {
@@ -5491,6 +5491,18 @@
             "title": "Notify",
             "description": "'true' to email you when processing finishes (opt-in)",
             "default": "false"
+          },
+          "enrichment_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enrichment Mode",
+            "description": "'server' (default) runs the internal AI enrichment. 'agent' runs the lesson bare (transcription, alignment, tokenisation, IPA) and leaves the meanings for you to fill in with your own agent via the translations draft/commit endpoints; requires the byo_enrichment plan feature"
           }
         },
         "type": "object",
@@ -6521,6 +6533,21 @@
             "type": "array",
             "title": "Meanings",
             "description": "One meaning per token, same order and length as the source sentence's tokens; '' for punctuation/interjections"
+          },
+          "token_details": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/TokenDetailV1"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Details",
+            "description": "Optional per-token cefr/gender, same order and length as 'meanings'. Only useful when filling a submission's OWN language in place (BYO enrichment); ignored fields may be null"
           }
         },
         "type": "object",
@@ -10368,7 +10395,7 @@
           "reason": {
             "type": "string",
             "title": "Reason",
-            "description": "unknown_position | meanings_length_mismatch | meaning_too_long | translation_too_long"
+            "description": "unknown_position | meanings_length_mismatch | meaning_too_long | translation_too_long | token_details_length_mismatch | invalid_cefr | gender_too_long"
           },
           "expected": {
             "anyOf": [
@@ -10848,6 +10875,37 @@
         ],
         "title": "SubmissionStatusV1",
         "description": "Processing status of a submission (poll after an upload)."
+      },
+      "TokenDetailV1": {
+        "properties": {
+          "cefr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cefr",
+            "description": "CEFR level of this token's lemma (A1-C2), or null"
+          },
+          "gender": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gender",
+            "description": "Grammatical gender marker for nouns (der/die/das, un/une, ...), or null"
+          }
+        },
+        "type": "object",
+        "title": "TokenDetailV1",
+        "description": "Optional grammar extras for ONE token of a drafted sentence."
       },
       "TranscriptSentenceV1": {
         "properties": {

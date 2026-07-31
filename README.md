@@ -22,7 +22,7 @@ required, everything happens by talking to an AI assistant.
 
 ## What it gives an agent
 
-Thirty tools. Twelve read from your account; sixteen write to it; two serve
+Forty tools. Nineteen read from your account; nineteen write to it; two serve
 guidance: `whats_possible` answers "what can I do here?" with a short menu
 and an example prompt per area, and `get_authoring_guide` serves the full
 authoring craft guides so remote clients that never see the skills still
@@ -38,7 +38,7 @@ compose good lessons, cards and annotations.
 | `get_audio_url` | `content:read` | A short-lived presigned URL to the full native audio (Range-capable). |
 | `search_examples` | `content:read` | Example sentences across your library, by word (`lemma`) or text (`q`). A capped sample, not exhaustive. |
 | `get_audio_clip` | `content:read` | Cuts a short native-audio snippet, **saves it to a local file**, and returns `{path, media_type, size_bytes}` for embedding in lessons. |
-| `get_authoring_guide` | none | Returns the full craft guide for `topic` (`overview`, `lesson`, `course`, `cards`, `annotations`, `add-language`, `discuss`) - the same content as the bundled skills, embedded in the package so remote clients get it too. Call it before composing. |
+| `get_authoring_guide` | none | Returns the full craft guide for `topic` (`overview`, `lesson`, `course`, `cards`, `annotations`, `add-language`, `discuss`, `guided`, `skill-author`) - the same content as the bundled skills, embedded in the package so remote clients get it too. Call it before composing. |
 | `list_decks` | `cards:write` or `decks:export` | Your study decks with card counts, for picking a `deck_id` to add to or export. |
 | `add_card` | `cards:write` | Adds a card to your review queue (FSRS, starts new). Preferred: the `card.v1` kinds (`word`, `phrase`, `collocation`, `idiom`, `chunk`, `grammar`, `cloze`, `contrast`, `qa`, `production`) anchored to a verbatim transcript sentence - the server derives the highlight/blur painting and native-audio clip, so the card matches the app's own. Legacy: `kind=vocab` from your vocabulary, or `kind=custom` front/back. Omit `deck_id` to use the deck for the card's own submission. |
 | `export_anki_deck` | `decks:export` | Exports a deck to Anki `.apkg` (no LLM), polling internally; returns a download URL when ready. A deck with no linked episode can't be exported. |
@@ -52,17 +52,26 @@ compose good lessons, cards and annotations.
 | `list_courses` | `lessons:write` | Your courses, newest first, each with its lesson count - for finding a `course_id` or seeing what series exist. |
 | `delete_course` | `lessons:write` | Deletes one course by id (destructive to the grouping, idempotent). Its lessons SURVIVE - their `course_id` is set null, un-grouping them; authored content is never deleted. |
 | `list_languages` | `content:read` | An episode's target languages and how to add more: the fan-out group so far (each with its own submission id + status), `available_targets` (ordinary Groq targets), `simplify_targets` (leveled same-language codes like `de-a2`) and in-progress drafts. |
-| `get_translation_source` | `content:read` | Pages the primary's sentences to translate yourself: source text, the pivot-language gloss per sentence and per token (which fixes each word's sense). Feeds the draft flow. |
+| `get_translation_source` | `content:read` | Pages the primary's sentences to translate yourself: source text, the pivot-language gloss per sentence and per token (which fixes each word's sense). Feeds the draft flow. Empty glosses throughout mean a **bare** episode, awaiting a cold fill. |
 | `add_language` | `translations:write` | Fans an episode out into 1-10 extra **ordinary** target languages server-side (Groq, no tokens of yours); returns a job per language. Leveled same-language codes are rejected here - use the draft flow. |
-| `put_language_translations` | `translations:write` | Uploads a batch (1-100) of agent-written draft sentences (whole-sentence translation + one meaning per token) for a target or leveled language; returns per-sentence rejections to repair. |
-| `commit_language` | `translations:write` | Validates a complete draft and applies it, minting the sibling deck; polls the job and returns the new submission id when ready. |
+| `put_language_translations` | `translations:write` | Uploads a batch (1-100) of agent-written draft sentences (whole-sentence translation + one meaning per token) for a target or leveled language; returns per-sentence rejections to repair. Targeting a bare episode's OWN language is the cold fill, and takes optional per-token `cefr`/`gender`. |
+| `commit_language` | `translations:write` | Validates a complete draft and applies it, minting the sibling deck; polls the job and returns the new submission id when ready. A cold fill applies in place instead - no sibling, no language slot - and un-bares the episode. |
 | `discard_language_draft` | `translations:write` | Deletes the in-progress draft rows for a language (destructive; never a committed sibling). |
+| `get_lesson_translation_source` | `translations:write` | Everything needed to translate ONE lesson into one language: its meta-language strings as path-addressed units (each `render` or `adapt`), the sibling/edition state, and the `version` token to echo back. Target-language text passes through unchanged. |
+| `put_lesson_translation` | `translations:write` | Saves your translated units as a language EDITION of the lesson on the sibling submission - target text, structure and answers stay byte-identical by construction. A 400 lists every problem at once; `base_version` guards a concurrent edit. |
+| `get_guided_translation_source` | `translations:write` | The same for a whole guided path: the plan's units plus per-section state (`master_lesson_id`, `unit_path_prefix`) and the `plan_version` token. |
+| `put_guided_plan_translation` | `translations:write` | Mints the sibling's guided plan from the master's translated plan units - once, before any section. Structure (positions, order, focus, minutes) is copied server-side. |
+| `put_guided_section_translation` | `translations:write` | Attaches ONE translated guided part to the sibling's plan, keyed by the section's `index` field and that lesson's own `base_version`. Sections go in any order. |
 | `list_annotations` | `content:read` | An episode's creator annotations (each a markdown note on a transcript sentence span), plus `count` and `max_annotations` so you can budget and avoid duplicates. |
 | `create_annotation` | `annotations:write` | Attaches a markdown creator note to a sentence span (Unicode code-point offsets into the sentence's `display`, or a whole-sentence note); the response echoes `selected_text` to verify the span. |
 | `update_annotation` | `annotations:write` | Replaces one annotation's note in place (the anchor stays put). |
 | `delete_annotation` | `annotations:write` | Deletes one annotation (destructive); also how you fix a mis-anchored span before re-creating it. |
+| `plan_guided_path` | `guided:write` | Starts (or reports) the server-side plan for a guided study path over an episode: the sections, their sentence ranges and their teaching focus. Poll it; calling twice while one is in flight is safe. |
+| `get_guided_path` | `guided:read` | The current guided path: plan status, every section with its bounds, focus and whether a part has been written for it yet. |
+| `get_guided_writer_brief` | `guided:write` | Claims one section and returns the runtime brief for it: the sentences, the target vocabulary, the audio windows and the pedagogy this part must follow. The brief - not this repo - is where the guided craft rules live. |
+| `submit_guided_lesson` | `guided:write` | Submits the written part back against its brief; the server validates it and renders it in the app exactly like an internally generated one. |
 
-Plus eight skills:
+Plus nine skills:
 
 - **`lingochunk-overview`** - the "what can I do?" tour: a short menu of
   every area (with an example prompt each) and instructions to answer
@@ -75,6 +84,10 @@ Plus eight skills:
   collection) into coherent parts, creates a course, then builds N lessons via
   the lesson skill with a different grammar point and ramping difficulty per
   lesson, each filed under the course in order.
+- **`lingochunk-guided`** - writes the parts of a guided study path yourself,
+  following the plan-brief-compose-submit loop, so they render exactly like
+  internally generated ones. It teaches only the loop: the pedagogy for each
+  part arrives inside its brief at runtime.
 - **`lingochunk-cards`** - builds native-grade flashcards with the `card.v1`
   kinds: verbatim transcript anchors, per-kind guidance (grammar =
   production cloze of the morpheme with a hint), and a quality rubric
@@ -85,7 +98,9 @@ Plus eight skills:
   as a new sibling deck: either the server-side Groq fan-out for an ordinary
   target, or an agent-supplied translation you write sentence by sentence and
   commit - the only way to build a leveled same-language deck (e.g.
-  "German (A2)", German audio glossed in simpler A2 German).
+  "German (A2)", German audio glossed in simpler A2 German). It also covers
+  the **cold fill**: finishing an episode processed without the server's AI,
+  by writing its word meanings yourself in its own language.
 - **`lingochunk-annotate`** - finds the genuinely useful expressions in one of
   your episodes (idioms, phrasal verbs, collocations, discourse markers,
   culture-bound references) and attaches a short markdown creator note to each
@@ -323,9 +338,10 @@ src/                                    the MCP server (TypeScript, stdio)
 skills/lingochunk-overview/             the "what can I do?" tour skill
 skills/lingochunk-lesson/               the coursebook lesson skill
 skills/lingochunk-course/               the multi-lesson course planner skill
+skills/lingochunk-guided/               the guided-path writer-loop skill
 skills/lingochunk-cards/                the flashcard (card.v1) skill
 skills/lingochunk-discuss/              the "discuss an episode" skill
-skills/lingochunk-add-language/         the add-language / draft-translation skill
+skills/lingochunk-add-language/         the add-language / draft-translation / cold-fill skill
 skills/lingochunk-annotate/             the useful-expression annotation skill
 skills/lingochunk-skill-author/         the meta-skill: lesson -> reusable skill
 skills/*/examples/                      example lesson.v1 documents (CI-validated)
@@ -362,7 +378,7 @@ npm run validate:lesson -- <doc.json>   # validate a lesson.v1 document (Node 22
 
 `spec/openapi-public-v1.json` is the source contract; it is exported from the
 LingoChunk repo (`make generate-openapi-public`) and refreshed here on each API
-release. This copy was taken from LingoChunk commit `31c47289`.
+release. This copy was taken from LingoChunk commit `505af49a`.
 
 ### Live smoke test
 

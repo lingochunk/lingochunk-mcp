@@ -64,6 +64,8 @@ export interface SourceToken {
   surface: string;
   lemma: string;
   pos: string;
+  /** Empty string on a bare (enrichment_mode='agent') submission: nobody has
+   *  glossed the token yet, so there is no sense to anchor to. */
   pivot_meaning: string;
 }
 
@@ -71,6 +73,8 @@ export interface SourceToken {
 export interface SourceSentence {
   position: number;
   text: string;
+  /** Empty on a bare submission that carries no Soniox sentence translation
+   *  (YouTube transcript imports); the agent supplies it in the cold fill. */
   pivot_translation: string;
   tokens: SourceToken[];
 }
@@ -91,12 +95,21 @@ export interface AddLanguagesResult {
   skipped: { language: string; reason: string }[];
 }
 
+/** Optional grammar extras for ONE token of a drafted sentence. Read only by
+ *  the cold fill (a bare submission's own language). */
+export interface TokenDetail {
+  cefr: string | null;
+  gender: string | null;
+}
+
 /** One draft sentence in a PUT batch: whole-sentence target text (null = no
  *  sentence back) plus one meaning per source token, in order. */
 export interface DraftSentence {
   position: number;
   translation: string | null;
   meanings: string[];
+  /** Cold fill only; same length as `meanings`. Omitted, not null, when absent. */
+  token_details?: TokenDetail[];
 }
 
 /** Result of PUT /submissions/{id}/translations/{language}. */

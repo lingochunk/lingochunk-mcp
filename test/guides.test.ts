@@ -47,6 +47,16 @@ describe("embedded authoring guides", () => {
     expect(GUIDES.lesson.body).toContain("Anchoring (mandatory)");
   });
 
+  it("the add-language guide carries the cold-fill chapter", () => {
+    // Cold fill is the third path (finishing a BARE, agent-enriched episode in
+    // its own language); a guide missing it would send the agent looking for a
+    // sibling language that must not be created.
+    const body = GUIDES["add-language"].body;
+    expect(body).toContain("Cold fill");
+    expect(body).toContain("token_details");
+    expect(body).toContain("enrichment_incomplete");
+  });
+
   it("the guided guide teaches the loop, not the pedagogy", () => {
     // Markers unique to the loop-only guided skill: it names the loop tools and
     // states plainly that the pedagogy arrives at runtime in the brief.

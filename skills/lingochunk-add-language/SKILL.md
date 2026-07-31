@@ -1,6 +1,6 @@
 ---
 name: lingochunk-add-language
-description: Add another language to one of the user's own LingoChunk episodes so it becomes a new sibling deck, and translate the episode's lessons and guided path into that language as EDITIONS. Deck side has two paths: trigger the server-side fan-out for an ordinary target language (Groq, spends no tokens), or translate the episode yourself sentence by sentence and commit it - the only way to build a leveled same-language deck (e.g. "German (A2)"). Lesson/guided side: the edition tools serve the meta-language strings as units you translate or adapt on your own tokens while target text stays byte-identical. Use when the user asks to add a language or translation to an episode, publish lessons or a guided path in another language, or make a simplified same-language (A1-B2) version of an episode.
+description: Add another language to one of the user's own LingoChunk episodes so it becomes a new sibling deck, translate the episode's lessons and guided path into that language as EDITIONS, and finish a BARE episode (one processed without the server's AI, so it has words but no meanings) by writing its meanings yourself. Deck side has three paths: trigger the server-side fan-out for an ordinary target language (Groq, spends no tokens); translate the episode yourself sentence by sentence and commit it - the only way to build a leveled same-language deck (e.g. "German (A2)"); or cold-fill a bare episode in its OWN language. Lesson/guided side: the edition tools serve the meta-language strings as units you translate or adapt on your own tokens while target text stays byte-identical. Use when the user asks to add a language or translation to an episode, publish lessons or a guided path in another language, make a simplified same-language (A1-B2) version of an episode, or finish/enrich an episode whose Words tab is empty.
 ---
 
 # LingoChunk add-language builder
@@ -9,7 +9,7 @@ Add a target language to one of the learner's own episodes. LingoChunk keeps a
 submission's audio, timestamps and word analysis and reuses them across
 languages; the ONLY per-language work is the translation surface (the
 whole-sentence translation plus one meaning per word). This skill drives that
-work two ways:
+work three ways:
 
 - **Ordinary target language, on the house.** `add_language` triggers the
   server's Groq fan-out. No tokens of yours, no per-word work - you hand it
@@ -20,10 +20,15 @@ work two ways:
   deck** (`en-a2`, `de-b1`, ...): the audio stays the source language and the
   "translation" is a SIMPLER register of that same language, for levelling up
   within a language you already read.
+- **Cold fill of a BARE episode, on your tokens.** Some episodes are
+  processed deliberately without the server's AI ("bring your own AI"): they
+  are `ready` and fully tokenised, but no word has a meaning yet. The same
+  draft-and-commit machinery fills the episode IN PLACE, in its OWN language.
+  See "Cold fill" below.
 
 The division of labour is the point: LingoChunk supplies the source material
-and mints the sibling; you supply the translation on the user's own tokens.
-Nothing here spends server LLM budget on the draft path.
+and mints the sibling (or holds the bare one); you supply the meanings on the
+user's own tokens. Nothing here spends server LLM budget on the draft path.
 
 This skill uses the `lingochunk` MCP tools. If they are not available, tell the
 user to add the LingoChunk MCP server (see the plugin README) and stop.
@@ -34,9 +39,16 @@ user to add the LingoChunk MCP server (see the plugin README) and stop.
 - "Translate my German episode into Polish."
 - "Make a simplified German (A2) version of this episode so I can level up."
 - "Add an English-glossed-in-simple-English deck to this recording."
+- "Finish this episode - I uploaded it to enrich with my own AI."
+- "My new episode has no words in the Words tab; fill it in."
 
 ## Pick the path first (ask only what the user left open)
 
+0. **Is the episode BARE?** If the user is asking you to finish, enrich or
+   fill in an episode rather than add a language to it, check with one
+   `get_translation_source` page: every token's `pivot_meaning` empty means
+   the episode is bare and wants the **cold fill**, not a new language. Skip
+   the rest of this list and go to "Cold fill".
 1. **Which submission.** A named episode, or `list_library` to find one. Only
    the READY primary of a group is a valid source; a derived sibling is not.
 2. **Which language(s).** Run `list_languages(submission_id)` and read:
@@ -72,7 +84,9 @@ user to add the LingoChunk MCP server (see the plugin README) and stop.
    in the pivot language) and `tokens` - `surface`, `lemma`, `pos` and a
    `pivot_meaning` that FIXES each word's sense (which homonym, which reading).
    Follow `next_from_position` until it is null. Note `pivot_language` and
-   `source_language` from the response.
+   `source_language` from the response. If every `pivot_meaning` comes back
+   empty, the episode is BARE and this is a cold fill instead - jump to
+   "Cold fill".
 2. **Translate in batches of 25-50 sentences.** Produce, per sentence:
    - `meanings`: one entry per token, **same order, exact same length as
      `tokens`** (count them). Rules below.
@@ -171,6 +185,119 @@ language**, ONLY where a genuinely simpler phrasing exists:
   un-simplified line is not. Correctness beats simplicity - never ship an
   ungrammatical or meaning-changed rewrite just to fill the field.
 
+## Cold fill (a BARE episode, in its OWN language)
+
+A LingoChunk plan can process an episode **without the server's AI
+enrichment** - the "bring your own AI" option, chosen at upload. Everything
+that does not need a language model is there: transcription, sentence and
+word timings, spaCy tokens with lemma and part of speech, IPA / pinyin /
+furigana, the audio itself. The episode is `ready` and playable. What is
+missing is exactly the layer a model writes: **no word has a meaning, so
+there is no vocabulary, no CEFR levels and no deck to study**. You write that
+layer, on the user's tokens, and the episode becomes an ordinary one.
+
+**Recognising a bare episode.** Fetch one page with
+`get_translation_source`. On a bare episode **every token's `pivot_meaning`
+is `""`**. `pivot_translation` may also be `""` - it is empty on imports that
+carry no machine sentence translation (YouTube transcripts), and present on
+ordinary audio uploads, where the transcriber supplies it. Nothing else about
+the page looks different, and there is no other flag to read.
+
+**The target is the episode's OWN language.** Not a new language: use the
+`pivot_language` from the same response (the language the episode is glossed
+in - `en` for a German episode studied in English). That target is legal ONLY
+for a bare episode; on an ordinary one the server answers 409
+`language_exists`, which is your proof the episode is already enriched and
+needs nothing.
+
+Flow:
+
+1. **Page the source** with `get_translation_source` until
+   `next_from_position` is null, as in the draft path. Note `pivot_language`
+   (your target) and `source_language`.
+2. **Work sentence by sentence, in batches of 25-50.** For each sentence:
+   read (or write) the whole-sentence translation FIRST, then gloss every
+   token consistently with that one reading. See the rules below.
+3. **Upload each batch** with `put_language_translations(submission_id,
+   language=<pivot_language>, generator, sentences)`, optionally carrying
+   `token_details`. Repair the `rejected` list and re-PUT those positions;
+   keep a local tally of covered positions.
+4. **Commit** with `commit_language(submission_id, <pivot_language>)` once
+   every position is drafted. It applies the draft **in place** - no sibling
+   deck is created and no language slot is used - then mints the vocabulary,
+   fills gender/CEFR you did not supply from LingoChunk's shared lexicon, and
+   generates the word audio. The tool polls the job; `status:'processing'`
+   just means it is still applying, so check again shortly.
+5. **Deliver.** Once the job completes, the episode's **Words tab, level
+   filters, deck building and Anki export all light up**, and it can be
+   published or fanned out into other languages like any other episode.
+
+### What to write (no anchors: the sense is yours to decide)
+
+The ordinary draft path hands you a `pivot_meaning` per token that fixes each
+word's sense. **In a cold fill there is none.** You are the model that
+resolves every ambiguity, so the reading has to come from the sentence:
+
+- **Translate the sentence before you gloss it.** Decide what the sentence
+  actually says, then make every token's meaning agree with that reading. A
+  word with several senses gets the one this sentence uses (the bank you sit
+  on, not the bank you bank at). When the sentence translation is already
+  present, use it as the reading; when it is empty, write it yourself - it is
+  a card field in its own right, and a bare YouTube import has no other
+  source for it.
+- **One natural meaning per token, in the pivot language.** The dictionary
+  base form in that sense: NOUN singular, VERB infinitive, ADJ/ADV base -
+  short, the way a bilingual dictionary would print it, not a definition or a
+  paraphrase. Proper nouns stay as the name.
+- **Gloss inflected forms as themselves, not as the sentence.** The meaning
+  belongs to the word, not to its position: gloss `ging` as "went", never as
+  "he went to the shop".
+- **`""` is for punctuation and pure function tokens only** - and only when
+  a gloss would genuinely be noise. Every content word (noun, verb,
+  adjective, adverb) must carry a meaning: the app measures the episode's
+  coverage over content words, and an empty one is a word the learner cannot
+  study. Function words a learner does look up (prepositions, pronouns,
+  modal particles) are worth glossing too. Never omit or add an ENTRY,
+  whatever you put in it - the array length must equal the token count.
+- **Consistency across the episode matters more than variety.** The same
+  lemma in the same sense should get the same meaning every time it appears;
+  the vocabulary is grouped by lemma, so wandering glosses split one word
+  into several study items.
+
+### Optional extras: `token_details`
+
+Per sentence you may send `token_details`, an array the SAME length as
+`meanings`, each entry `{cefr, gender}` - both optional, both `null` when you
+are not confident:
+
+- **`cefr`**: the CEFR level of that token's lemma (`A1`-`C2`), a property of
+  the word itself, not of this sentence. It is what drives the app's level
+  filters and "words above my level" flows.
+- **`gender`**: the grammatical gender marker for a noun, written the way the
+  language writes it (`der` / `die` / `das`, `un` / `une`, `de` / `het`), 10
+  characters at most. Nouns only; leave it `null` everywhere else.
+
+Send them only when you are confident: a wrong level or gender is worse than
+none, because anything you leave `null` is filled from LingoChunk's shared
+lexicon at commit, for free. Omit `token_details` entirely for a sentence (or
+for the whole episode) if you have nothing to add. The field is read only in
+a cold fill; it does nothing on an ordinary sibling or leveled draft.
+
+### While the episode is still bare
+
+Until the commit job finishes, LingoChunk refuses the things that would
+expose or copy the missing meanings, each with a 409 `enrichment_incomplete`:
+
+- **publishing** the episode to a collection or channel (guests would see an
+  episode with no words),
+- **`add_language`** fan-out and drafting any OTHER language (both copy the
+  episode's meanings, so they would produce a permanently empty sibling).
+
+Say this plainly if the user asks for either mid-fill: it is a sequencing
+rule, not a failure, and it lifts the moment the commit completes. Everything
+else - listening, the transcript, lessons, annotations - works on a bare
+episode already.
+
 ## Optional enrichment
 
 Cultural references, extended usage notes and full idiom explanations do not fit
@@ -182,11 +309,12 @@ natively alongside the deck.
 ## Hard rules
 
 - **Ground, do not invent.** Translate the sentences the tools return; take each
-  word's sense from its `pivot_meaning`. Never invent words the sentence does
-  not contain or attribute content to the recording.
+  word's sense from its `pivot_meaning` - or, in a cold fill where there is
+  none, from the sentence itself. Never invent words the sentence does not
+  contain or attribute content to the recording.
 - **One meaning per token, same order, exact length.** A length mismatch is
   rejected per sentence - count the tokens (including the ones that map to
-  `""`).
+  `""`). The same goes for `token_details` when you send it.
 - **Leveled output stays monolingual.** For `en-a2`, `de-b1`, ... every meaning
   and every sentence line is in the source language; never leak the pivot
   language onto a card. Empty leveled sentence -> `null`, never the source or

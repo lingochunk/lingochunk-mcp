@@ -285,7 +285,11 @@ async function commitDraft(
 
 /** Commit a language draft, then poll the apply job for up to ~60s. On success
  *  resolve the new sibling's submission id via list_languages. A 409 (the draft
- *  is missing sentence positions) or 403 bubbles up as an ApiError. */
+ *  is missing sentence positions) or 403 bubbles up as an ApiError.
+ *
+ *  A cold fill (a bare lesson's OWN language) applies in place, so the resolved
+ *  id is the submission itself; the result says so rather than letting the agent
+ *  report a sibling deck that was never created. */
 async function commitAndPoll(
   client: LingoChunkClient,
   submissionId: string,
@@ -314,11 +318,21 @@ async function commitAndPoll(
       } catch {
         // The apply succeeded; failing to resolve the sibling id is non-fatal.
       }
+      const inPlace = siblingId === submissionId;
       return jsonResult({
         status: "completed",
         language,
         submission_id: siblingId,
         job_id: jobId,
+        ...(inPlace
+          ? {
+              in_place: true,
+              message:
+                "Filled this lesson's own language in place - no new sibling " +
+                "deck. Its words, level filters and deck flows are live now, " +
+                "and it can be published or fanned out from here.",
+            }
+          : {}),
       });
     }
     if (job.status === "failed") {
@@ -1592,9 +1606,14 @@ export function registerTools(
         "same length as 'tokens'; render the sense the 'pivot_meaning' fixes " +
         "(do not re-interpret the word); PUNCT and INTJ tokens map to \"\"; " +
         "proper nouns stay as the name; never copy the pivot or source word " +
-        "verbatim as its meaning. Before drafting, call get_authoring_guide " +
+        "verbatim as its meaning. BARE lessons (uploaded with " +
+        "enrichment_mode='agent') answer with an EMPTY 'pivot_translation' " +
+        "and an empty 'pivot_meaning' on every token: there is nothing to " +
+        "anchor to, so you read each word's sense off the sentence yourself " +
+        "and fill the lesson IN PLACE by drafting its own 'pivot_language'. " +
+        "Before drafting, call get_authoring_guide " +
         "with topic='add-language' (once per conversation) for the full " +
-        "per-level rules (ordinary target vs leveled same-language). " +
+        "per-level rules (ordinary target, leveled same-language, cold fill). " +
         "Page with 'from_position' (0-based) until 'next_from_position' is " +
         "null. Only the READY primary of a group is a valid source. Requires " +
         "the content:read scope.",
@@ -1630,9 +1649,15 @@ export function registerTools(
         "whole-sentence 'translation' (or null to leave the sentence back " +
         "blank - hide-on-fail for leveled decks) and 'meanings' (one per " +
         "source token, SAME ORDER and EXACT length as that sentence's " +
-        "tokens). The server validates each sentence against the real " +
-        "transcript and returns a 'rejected' list (meanings_length_mismatch " +
-        "with expected/got, unknown position, oversize strings) while " +
+        "tokens). COLD FILL: passing the submission's OWN language (the " +
+        "source's 'pivot_language') is legal only for a bare lesson uploaded " +
+        "with enrichment_mode='agent' and fills it IN PLACE instead of " +
+        "minting a sibling; only there is the optional 'token_details' " +
+        "(cefr/gender per token) applied. The server validates each sentence " +
+        "against the real transcript and returns a 'rejected' list " +
+        "(meanings_length_mismatch with expected/got, unknown position, " +
+        "oversize strings, token_details_length_mismatch, invalid_cefr, " +
+        "gender_too_long) while " +
         "ACCEPTING the rest - fix the rejected ones and PUT them again. " +
         "'sentences_drafted' / 'sentence_count' track completeness. Set " +
         "'generator' to the model producing the translations, for provenance. " +
@@ -1672,6 +1697,41 @@ export function registerTools(
                   "One meaning per source token, same order and exact length " +
                     "as the sentence's tokens.",
                 ),
+              token_details: z
+                .array(
+                  z.object({
+                    cefr: z
+                      .string()
+                      .transform((v) => v.trim().toUpperCase())
+                      .refine(
+                        (v) => ["A1", "A2", "B1", "B2", "C1", "C2"].includes(v),
+                        { message: "cefr must be one of A1, A2, B1, B2, C1, C2" },
+                      )
+                      .nullable()
+                      .optional()
+                      .describe(
+                        "CEFR level of this token's lemma (normalised to " +
+                          "uppercase), or null when you are not confident.",
+                      ),
+                    gender: z
+                      .string()
+                      .max(10)
+                      .nullable()
+                      .optional()
+                      .describe(
+                        "Grammatical gender marker for a noun as the language " +
+                          "writes it (der/die/das, un/une, de/het; 10 chars " +
+                          "max), or null.",
+                      ),
+                  }),
+                )
+                .optional()
+                .describe(
+                  "COLD FILL ONLY: optional cefr/gender per token, same order " +
+                    "and exact length as 'meanings'. Applied when filling a " +
+                    "bare lesson's own language; omit it entirely for an " +
+                    "ordinary sibling or leveled draft.",
+                ),
             }),
           )
           .min(1)
@@ -1687,6 +1747,17 @@ export function registerTools(
             position: s.position,
             translation: s.translation ?? null,
             meanings: s.meanings,
+            // Omitted entirely when absent: the server reads the key's
+            // presence, and an all-null array would still be a length the
+            // per-sentence validator checks against the token count.
+            ...(s.token_details
+              ? {
+                  token_details: s.token_details.map((d) => ({
+                    cefr: d.cefr ?? null,
+                    gender: d.gender ?? null,
+                  })),
+                }
+              : {}),
           })),
         }),
       ),
@@ -1701,7 +1772,15 @@ export function registerTools(
         "new sibling submission (its own deck). The draft must cover EVERY " +
         "sentence position of the primary: a 409 lists the missing count and " +
         "first missing positions - PUT those with put_language_translations, " +
-        "then commit again. This starts the apply job and polls it for up to " +
+        "then commit again. COLD FILL: committing a bare lesson's OWN " +
+        "language (enrichment_mode='agent') applies the draft IN PLACE - " +
+        "meanings, sentence translations and any cefr/gender land on this " +
+        "submission, vocabulary is minted, and the lesson stops counting as " +
+        "bare, so no sibling is created and no language slot is used. Until " +
+        "that job completes the lesson cannot be published to a collection, " +
+        "fanned out with add_language, or drafted into another language " +
+        "(409 enrichment_incomplete). This starts the apply job and polls it " +
+        "for up to " +
         "~60s: it returns {status:'completed', submission_id} with the new " +
         "sibling's id when ready, {status:'processing'} (call list_languages " +
         "shortly to check) if it is still applying, or {status:'failed'} to " +
@@ -1879,11 +1958,14 @@ export function registerTools(
         "plan's units (section titles, summaries, skip reasons, function " +
         "labels, grammar names - grammar names are 'adapt': name the " +
         "phenomenon the way the new learner language names it) plus per-" +
-        "section state. FLOW: 1) put_guided_translation with the plan units " +
+        "section state. FLOW: 1) put_guided_plan_translation ONCE with the " +
+        "plan units and this response's 'plan_version' as base_version " +
         "(mints the sibling's plan); 2) for each section with a " +
         "master_lesson_id, get_lesson_translation_source on that lesson, " +
-        "translate, and put_guided_translation with section_index - any " +
-        "order. The same render/adapt + target-text-unchanged contract as " +
+        "translate, and put_guided_section_translation with that section's " +
+        "'index' FIELD and the lesson's own version as base_version - any " +
+        "order. Pair plan units with sections by 'unit_path_prefix', never " +
+        "by the index. The same render/adapt + target-text-unchanged contract as " +
         "get_lesson_translation_source applies. Requires the " +
         "translations:write scope.",
       inputSchema: {

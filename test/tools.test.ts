@@ -14,20 +14,25 @@ type Handler = (args: Record<string, unknown>) => Promise<CallToolResult>;
 interface Registered {
   handler: Handler;
   schema: z.ZodRawShape;
+  description: string;
 }
 
-/** A stand-in server that captures each tool's schema and handler, so `call`
- *  can validate + transform args exactly as the real server would before the
- *  handler runs. */
+/** A stand-in server that captures each tool's schema, description and
+ *  handler, so `call` can validate + transform args exactly as the real server
+ *  would before the handler runs. */
 function fakeServer(): { server: McpServer; tools: Map<string, Registered> } {
   const tools = new Map<string, Registered>();
   const server = {
     registerTool(
       name: string,
-      config: { inputSchema: z.ZodRawShape },
+      config: { inputSchema: z.ZodRawShape; description?: string },
       handler: Handler,
     ): void {
-      tools.set(name, { handler, schema: config.inputSchema });
+      tools.set(name, {
+        handler,
+        schema: config.inputSchema,
+        description: config.description ?? "",
+      });
     },
   } as unknown as McpServer;
   return { server, tools };
@@ -160,6 +165,23 @@ describe("tool registration", () => {
         "whats_possible",
       ].sort(),
     );
+  });
+
+  // The folded put_guided_translation was split into the per-endpoint plan and
+  // section tools (0.12.0); a description that still names it sends the agent
+  // after a tool the server does not register. Neither replacement name
+  // contains the removed one as a substring, so this is an exact check.
+  it("no description points at the removed put_guided_translation tool", () => {
+    const stale = [...tools.entries()]
+      .filter(([, t]) => t.description.includes("put_guided_translation"))
+      .map(([name]) => name);
+    expect(stale).toEqual([]);
+  });
+
+  it("the guided source's FLOW names both replacement tools", () => {
+    const flow = tools.get("get_guided_translation_source")!.description;
+    expect(flow).toContain("put_guided_plan_translation");
+    expect(flow).toContain("put_guided_section_translation");
   });
 });
 
@@ -1226,6 +1248,93 @@ describe("language tools", () => {
     });
   });
 
+  it("put_language_translations sends token_details for a cold fill, filling absent fields with null", async () => {
+    mockFetch(
+      jsonResponse({
+        accepted: 1,
+        rejected: [],
+        sentences_drafted: 1,
+        sentence_count: 40,
+      }),
+    );
+    await call("put_language_translations", {
+      submission_id: "bare1",
+      // The submission's OWN language: the in-place cold fill.
+      language: "en",
+      generator: "claude-fable-5",
+      sentences: [
+        {
+          position: 0,
+          translation: "The group met yesterday.",
+          meanings: ["the group", "met", ""],
+          token_details: [
+            { cefr: "b1", gender: "die" },
+            { cefr: "a2" },
+            {},
+          ],
+        },
+      ],
+    });
+    expect(lastUrl).toBe(
+      "https://api.test/api/v1/submissions/bare1/translations/en",
+    );
+    expect(JSON.parse(String(lastInit.body))).toEqual({
+      generator: "claude-fable-5",
+      sentences: [
+        {
+          position: 0,
+          translation: "The group met yesterday.",
+          meanings: ["the group", "met", ""],
+          token_details: [
+            { cefr: "B1", gender: "die" },
+            { cefr: "A2", gender: null },
+            { cefr: null, gender: null },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("put_language_translations rejects an out-of-range cefr client-side", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    await expect(
+      call("put_language_translations", {
+        submission_id: "bare1",
+        language: "en",
+        sentences: [
+          {
+            position: 0,
+            meanings: ["x"],
+            token_details: [{ cefr: "D1" }],
+          },
+        ],
+      }),
+    ).rejects.toThrow(/A1, A2, B1, B2, C1, C2/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("put_language_translations rejects an over-long gender client-side", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    await expect(
+      call("put_language_translations", {
+        submission_id: "bare1",
+        language: "en",
+        sentences: [
+          {
+            position: 0,
+            meanings: ["x"],
+            // The server stores gender in a 10-char column and rejects the
+            // sentence with gender_too_long; fail before spending the round trip.
+            token_details: [{ gender: "masculine-plural" }],
+          },
+        ],
+      }),
+    ).rejects.toThrow();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it("put_language_translations rejects more than 100 sentences client-side", async () => {
     const spy = vi.fn();
     vi.stubGlobal("fetch", spy);
@@ -1274,7 +1383,47 @@ describe("language tools", () => {
       expect(payload.status).toBe("completed");
       expect(payload.language).toBe("de-a2");
       expect(payload.submission_id).toBe("sib1");
+      // A real sibling was minted, so the cold-fill flag must stay absent.
+      expect(payload.in_place).toBeUndefined();
       expect(lastUrl).toBe("https://api.test/api/v1/submissions/s1/languages");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("commit_language reports a cold fill as in-place, not as a new sibling", async () => {
+    vi.useFakeTimers();
+    try {
+      mockFetchSequence([
+        jsonResponse({ job_id: "j3", language: "en" }),
+        jsonResponse({ status: "completed", progress: 100 }),
+        // An in-place fill mints nothing: the submission's own language
+        // resolves back to the submission itself.
+        jsonResponse({
+          source_language: "de",
+          languages: [
+            {
+              language: "en",
+              submission_id: "bare1",
+              status: "ready",
+              is_primary: true,
+            },
+          ],
+          available_targets: ["fr"],
+          simplify_targets: [],
+          drafts: [],
+        }),
+      ]);
+      const p = call("commit_language", {
+        submission_id: "bare1",
+        language: "en",
+      });
+      await vi.advanceTimersByTimeAsync(2100);
+      const payload = JSON.parse(textOf(await p));
+      expect(payload.status).toBe("completed");
+      expect(payload.submission_id).toBe("bare1");
+      expect(payload.in_place).toBe(true);
+      expect(payload.message).toContain("in place");
     } finally {
       vi.useRealTimers();
     }
